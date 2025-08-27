@@ -11,13 +11,27 @@ A fast, lightweight terminal-based EPUB reader built in Rust.
 - Page navigation (Space/b)
 - Quick jumps (g/G for start/end)
 
+## Installation
+
+### Install from Source
+```bash
+cargo install --git https://github.com/thomaspmurphy/catatau
+```
+
+### Install from Local Directory
+```bash
+git clone https://github.com/thomaspmurphy/catatau
+cd catatau
+cargo install --path .
+```
+
 ## Usage
 
 ```bash
-cargo run path/to/book.epub
+ctt path/to/book.epub
 ```
 
-Eventually we would expect this to be installed to $PATH and create a SQLite database locally to store book positions, annotations, highlights and bookmarks. It will also be possible to point it to library folder to populate the library mode.
+The application will be installed as `ctt` and available globally in your PATH.
 
 Keyboard controls are loosely inspired by vim.
 
