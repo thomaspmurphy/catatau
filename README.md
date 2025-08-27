@@ -1,5 +1,7 @@
 # Catatau - Terminal EPUB Reader
 
+<img width="1036" height="296" alt="Screenshot 2025-08-27 at 08 31 35" src="https://github.com/user-attachments/assets/4b2f974b-a9fc-492b-a6b1-31b39f615e85" />
+
 A fast, lightweight terminal-based EPUB reader built in Rust.
 
 ## Current Status ✅
