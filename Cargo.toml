@@ -1,0 +1,17 @@
+[package]
+name = "catatau"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ratatui = "0.28"
+crossterm = "0.28"
+zip = "2.1"
+quick-xml = "0.36"
+html2text = "0.12"
+clap = { version = "4.0", features = ["derive"] }
+skim = "0.15"
+regex = "1.10"
+
+[dev-dependencies]
+tempfile = "3.10"
