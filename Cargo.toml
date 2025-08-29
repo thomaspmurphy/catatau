@@ -1,6 +1,6 @@
 [package]
 name = "catatau"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 edition = "2024"
 description = "A TUI EPUB reader with fuzzy search and navigation"
 license = "MIT OR Apache-2.0"
