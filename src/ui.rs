@@ -15,7 +15,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 use std::io;
 
@@ -716,26 +716,23 @@ impl App {
         // Results list
         let items: Vec<ListItem> = results
             .iter()
-            .enumerate()
-            .map(|(i, result)| {
-                let style = if i == selected_index {
-                    Style::default().bg(Color::Yellow).fg(Color::Black)
-                } else {
-                    Style::default()
-                };
-                ListItem::new(result.as_str()).style(style)
-            })
+            .map(|result| ListItem::new(result.as_str()))
             .collect();
 
         let results_list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(format!(
                 "Results ({}/{})",
-                selected_index + 1,
+                if results.is_empty() { 0 } else { selected_index + 1 },
                 results.len()
             )))
-            .style(Style::default().fg(Color::White));
+            .style(Style::default().fg(Color::White))
+            .highlight_style(Style::default().bg(Color::Yellow).fg(Color::Black))
+            .highlight_symbol("▶ ");
 
-        f.render_widget(results_list, chunks[1]);
+        let mut list_state = ListState::default();
+        list_state.select(if results.is_empty() { None } else { Some(selected_index) });
+
+        f.render_stateful_widget(results_list, chunks[1], &mut list_state);
     }
 
     fn render_contents_pane(f: &mut Frame, epub: &EpubReader, selected_index: usize) {
