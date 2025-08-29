@@ -1,7 +1,13 @@
 [package]
 name = "catatau"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2024"
+description = "A TUI EPUB reader with fuzzy search and navigation"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/thomas/catatau"
+authors = ["Thomas <your-email@example.com>"]
+keywords = ["epub", "tui", "reader", "fuzzy-search"]
+categories = ["command-line-utilities", "text-processing"]
 
 [[bin]]
 name = "ctt"
