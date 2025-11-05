@@ -130,12 +130,10 @@ impl App {
             }
 
             if let Event::Key(key) = event::read()? {
-                // Handle floating pane interactions first
                 if self.handle_floating_pane_input(key) {
                     continue;
                 }
 
-                // Regular navigation when no floating pane is active
                 match key.code {
                     KeyCode::Char('q') => break,
                     KeyCode::Down | KeyCode::Char('j') => {
@@ -223,7 +221,6 @@ impl App {
             ])
             .split(f.area());
 
-        // Header
         let header = Paragraph::new(vec![Line::from(vec![
             Span::styled(
                 &epub.title,
@@ -246,10 +243,8 @@ impl App {
         );
         f.render_widget(header, chunks[0]);
 
-        // Content
-        if let Some(chapter) = epub.chapters.get(current_chapter) {
+        if let Ok(chapter) = epub.get_chapter(current_chapter) {
             let lines: Vec<Line> = if let Some(search_term) = highlighted_search_term {
-                // Create highlighted lines
                 chapter
                     .content
                     .lines()
@@ -258,7 +253,6 @@ impl App {
                     .map(|line| Self::highlight_line(line, search_term))
                     .collect()
             } else {
-                // Regular lines without highlighting
                 chapter
                     .content
                     .lines()
@@ -284,16 +278,14 @@ impl App {
             f.render_widget(content, chunks[1]);
         }
 
-        // Footer with navigation help
         let footer_text = format!(
             "{}/{} | q:quit, ↑↓/jk:scroll, ←→/hl:chapters, space/b:page, g/G:start/end, /:search, -:contents",
             current_chapter + 1,
-            epub.chapters.len()
+            epub.chapter_count()
         );
         let footer = Paragraph::new(footer_text).style(Style::default().fg(Color::Gray));
         f.render_widget(footer, chunks[2]);
 
-        // IMPORTANT: Render floating panes on top of everything else
         Self::render_floating_pane(f, floating_pane, epub);
     }
 
@@ -304,7 +296,6 @@ impl App {
         if let Some(pos) = line_lower.find(&search_lower) {
             let mut spans = Vec::new();
 
-            // Text before the match
             if pos > 0 {
                 spans.push(Span::styled(
                     line[..pos].to_string(),
@@ -312,14 +303,12 @@ impl App {
                 ));
             }
 
-            // The highlighted match
             let end_pos = pos + search_term.len();
             spans.push(Span::styled(
                 line[pos..end_pos.min(line.len())].to_string(),
                 Style::default().bg(Color::Yellow).fg(Color::Black),
             ));
 
-            // Text after the match
             if end_pos < line.len() {
                 spans.push(Span::styled(
                     line[end_pos..].to_string(),
@@ -336,13 +325,12 @@ impl App {
         }
     }
 
-    // Helper methods for scroll calculations
     fn get_page_size(&self) -> usize {
         self.terminal_height.saturating_sub(UI_RESERVED_HEIGHT)
     }
 
     fn get_max_scroll_for_chapter(&self, chapter_index: usize) -> usize {
-        if let Some(chapter) = self.epub.chapters.get(chapter_index) {
+        if let Ok(chapter) = self.epub.get_chapter(chapter_index) {
             let total_lines = chapter.content.lines().count();
             total_lines.saturating_sub(self.get_page_size())
         } else {
@@ -384,7 +372,7 @@ impl App {
     }
 
     fn next_chapter(&mut self) {
-        if self.nav_state.current_chapter < self.epub.chapters.len().saturating_sub(1) {
+        if self.nav_state.current_chapter < self.epub.chapter_count().saturating_sub(1) {
             self.nav_state.current_chapter += 1;
             self.nav_state.reset_scroll();
         }
@@ -407,16 +395,18 @@ impl App {
 
     fn build_search_items(&self) -> Vec<String> {
         let mut all_lines = Vec::new();
-        for (chapter_index, chapter) in self.epub.chapters.iter().enumerate() {
-            for (line_index, line) in chapter.content.lines().enumerate() {
-                if !line.trim().is_empty() && line.trim().len() > MIN_SEARCH_LINE_LENGTH {
-                    let truncated = self.truncate_line_for_display(line);
-                    all_lines.push(format!(
-                        "Ch{:2} L{:3}: {}",
-                        chapter_index + 1,
-                        line_index + 1,
-                        truncated.trim()
-                    ));
+        for chapter_index in 0..self.epub.chapter_count() {
+            if let Ok(chapter) = self.epub.get_chapter(chapter_index) {
+                for (line_index, line) in chapter.content.lines().enumerate() {
+                    if !line.trim().is_empty() && line.trim().len() > MIN_SEARCH_LINE_LENGTH {
+                        let truncated = self.truncate_line_for_display(line);
+                        all_lines.push(format!(
+                            "Ch{:2} L{:3}: {}",
+                            chapter_index + 1,
+                            line_index + 1,
+                            truncated.trim()
+                        ));
+                    }
                 }
             }
         }
@@ -439,7 +429,6 @@ impl App {
     }
 
     fn parse_search_result_location(text: &str) -> Option<SearchResultLocation> {
-        // Parse chapter and line from format: "ChXX LYYY: content"
         let ch_pos = text.find("Ch")?;
         let l_pos = text.find(" L")?;
         let colon_pos = text.find(": ")?;
@@ -454,24 +443,17 @@ impl App {
     }
 
     fn jump_to_search_location(&mut self, location: SearchResultLocation, search_query: &str) {
-        // Validate chapter exists
-        if location.chapter == 0 || location.chapter > self.epub.chapters.len() {
+        if location.chapter == 0 || location.chapter > self.epub.chapter_count() {
             return;
         }
 
-        self.nav_state.current_chapter = location.chapter - 1; // Convert to 0-based
+        self.nav_state.current_chapter = location.chapter - 1;
 
-        // Validate line exists and set scroll position
-        if let Some(_chapter) = self.epub.chapters.get(self.nav_state.current_chapter) {
-            let target_line = location.line.saturating_sub(1); // Convert to 0-based
-
-            // Set scroll offset to show the target line near the top
+        if self.epub.get_chapter(self.nav_state.current_chapter).is_ok() {
+            let target_line = location.line.saturating_sub(1);
             self.nav_state.scroll_offset = target_line.saturating_sub(SEARCH_RESULT_TOP_OFFSET);
-
-            // Ensure we don't scroll past the end
             self.clamp_scroll_to_limits(self.nav_state.current_chapter);
 
-            // Set the search term for highlighting if we have a query
             if !search_query.is_empty() {
                 self.nav_state.highlighted_search_term = Some(search_query.to_string());
             }
@@ -485,7 +467,6 @@ impl App {
     }
 
     fn parse_chapter_location(text: &str) -> Option<ChapterLocation> {
-        // Parse chapter from format: "X: Title"
         let colon_pos = text.find(": ")?;
 
         let chapter_str = text[0..colon_pos].trim();
@@ -495,16 +476,14 @@ impl App {
     }
 
     fn jump_to_chapter_location(&mut self, location: ChapterLocation) {
-        // Validate chapter exists
-        if location.chapter == 0 || location.chapter > self.epub.chapters.len() {
+        if location.chapter == 0 || location.chapter > self.epub.chapter_count() {
             return;
         }
 
-        self.nav_state.current_chapter = location.chapter - 1; // Convert to 0-based
-        self.nav_state.reset_scroll(); // Start at the beginning of the chapter
+        self.nav_state.current_chapter = location.chapter - 1;
+        self.nav_state.reset_scroll();
     }
 
-    // Floating pane methods
     fn handle_floating_pane_input(&mut self, key: crossterm::event::KeyEvent) -> bool {
         let floating_pane = std::mem::replace(&mut self.floating_pane, FloatingPane::None);
 
@@ -519,10 +498,7 @@ impl App {
                 mut selected_index,
             } => {
                 match key.code {
-                    KeyCode::Esc => {
-                        // Keep floating_pane as None
-                        true
-                    }
+                    KeyCode::Esc => true,
                     KeyCode::Char(c) => {
                         query.push(c);
                         let new_results = self.filter_search_results(&query);
@@ -567,7 +543,6 @@ impl App {
                         if let Some(selected_text) = results.get(selected_index) {
                             let query_copy = query.clone();
                             let selected_text_copy = selected_text.clone();
-                            // floating_pane remains None
                             self.parse_and_jump_to_search_selection(
                                 &selected_text_copy,
                                 &query_copy,
@@ -593,32 +568,26 @@ impl App {
             }
             FloatingPane::Contents { mut selected_index } => {
                 match key.code {
-                    KeyCode::Esc => {
-                        // Keep floating_pane as None
-                        true
-                    }
+                    KeyCode::Esc => true,
                     KeyCode::Up => {
                         selected_index = selected_index.saturating_sub(1);
                         self.floating_pane = FloatingPane::Contents { selected_index };
                         true
                     }
                     KeyCode::Down => {
-                        if selected_index < self.epub.chapters.len().saturating_sub(1) {
+                        if selected_index < self.epub.chapter_count().saturating_sub(1) {
                             selected_index += 1;
                         }
                         self.floating_pane = FloatingPane::Contents { selected_index };
                         true
                     }
                     KeyCode::Enter => {
-                        let selected_text = format!(
-                            "{}: {}",
-                            selected_index + 1,
-                            self.epub
-                                .chapters
-                                .get(selected_index)
-                                .map_or("", |ch| &ch.title)
-                        );
-                        // floating_pane remains None
+                        let title = self
+                            .epub
+                            .get_chapter(selected_index)
+                            .map(|ch| ch.title)
+                            .unwrap_or_else(|_| String::from(""));
+                        let selected_text = format!("{}: {}", selected_index + 1, title);
                         self.parse_and_jump_to_chapter(&selected_text);
                         true
                     }
@@ -678,7 +647,6 @@ impl App {
     fn render_search_pane(f: &mut Frame, query: &str, results: &[String], selected_index: usize) {
         let area = f.area();
 
-        // Create centered popup area (80% width, 60% height)
         let popup_width = area.width.saturating_mul(80).saturating_div(100);
         let popup_height = area.height.saturating_mul(60).saturating_div(100);
         let x = area.width.saturating_sub(popup_width).saturating_div(2);
@@ -691,7 +659,6 @@ impl App {
             height: popup_height,
         };
 
-        // Clear the popup area
         f.render_widget(Clear, popup_area);
 
         let chunks = Layout::default()
@@ -702,7 +669,6 @@ impl App {
             ])
             .split(popup_area);
 
-        // Search input box
         let input = Paragraph::new(format!("Search: {}", query))
             .block(
                 Block::default()
@@ -713,7 +679,6 @@ impl App {
             .wrap(Wrap { trim: false });
         f.render_widget(input, chunks[0]);
 
-        // Results list
         let items: Vec<ListItem> = results
             .iter()
             .map(|result| ListItem::new(result.as_str()))
@@ -738,7 +703,6 @@ impl App {
     fn render_contents_pane(f: &mut Frame, epub: &EpubReader, selected_index: usize) {
         let area = f.area();
 
-        // Create centered popup area (60% width, 50% height)
         let popup_width = area.width.saturating_mul(60).saturating_div(100);
         let popup_height = area.height.saturating_mul(50).saturating_div(100);
         let x = area.width.saturating_sub(popup_width).saturating_div(2);
@@ -751,21 +715,18 @@ impl App {
             height: popup_height,
         };
 
-        // Clear the popup area
         f.render_widget(Clear, popup_area);
 
-        // Contents list
-        let items: Vec<ListItem> = epub
-            .chapters
-            .iter()
-            .enumerate()
-            .map(|(i, chapter)| {
-                let style = if i == selected_index {
-                    Style::default().bg(Color::Yellow).fg(Color::Black)
-                } else {
-                    Style::default()
-                };
-                ListItem::new(format!("{}: {}", i + 1, chapter.title)).style(style)
+        let items: Vec<ListItem> = (0..epub.chapter_count())
+            .filter_map(|i| {
+                epub.get_chapter(i).ok().map(|chapter| {
+                    let style = if i == selected_index {
+                        Style::default().bg(Color::Yellow).fg(Color::Black)
+                    } else {
+                        Style::default()
+                    };
+                    ListItem::new(format!("{}: {}", i + 1, chapter.title)).style(style)
+                })
             })
             .collect();
 

@@ -188,6 +188,7 @@ valgrind-*.log
 
 # LLM stuff
 CLAUDE.md
+IMPROVEMENETS.md
 
 # Test books
 *.epub

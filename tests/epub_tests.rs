@@ -72,31 +72,31 @@ fn create_test_epub() -> (TempDir, std::path::PathBuf) {
 fn test_epub_parsing() {
     let (_temp_dir, epub_path) = create_test_epub();
     let epub = EpubReader::new(&epub_path).expect("Failed to parse test EPUB");
-    
+
     assert_eq!(epub.title, "Test Book");
     assert_eq!(epub.author, "Test Author");
-    assert_eq!(epub.chapters.len(), 2);
-    
-    assert_eq!(epub.chapters[0].title, "Chapter 1");
-    assert!(epub.chapters[0].content.contains("Chapter One"));
-    assert!(epub.chapters[0].content.contains("first chapter"));
-    
-    assert_eq!(epub.chapters[1].title, "Chapter 2");
-    assert!(epub.chapters[1].content.contains("Chapter Two"));
-    assert!(epub.chapters[1].content.contains("second chapter"));
+    assert_eq!(epub.chapter_count(), 2);
+
+    let chapter0 = epub.get_chapter(0).expect("Failed to get chapter 0");
+    assert_eq!(chapter0.title, "Chapter 1");
+    assert!(chapter0.content.contains("Chapter One"));
+    assert!(chapter0.content.contains("first chapter"));
+
+    let chapter1 = epub.get_chapter(1).expect("Failed to get chapter 1");
+    assert_eq!(chapter1.title, "Chapter 2");
+    assert!(chapter1.content.contains("Chapter Two"));
+    assert!(chapter1.content.contains("second chapter"));
 }
 
 #[test]
 fn test_chapter_content_extraction() {
     let (_temp_dir, epub_path) = create_test_epub();
     let epub = EpubReader::new(&epub_path).expect("Failed to parse test EPUB");
-    
-    // Test that HTML is converted to readable text
-    let chapter1 = &epub.chapters[0];
+
+    let chapter1 = epub.get_chapter(0).expect("Failed to get chapter 0");
     assert!(chapter1.content.contains("Chapter One"));
     assert!(chapter1.content.contains("Lorem ipsum"));
-    
-    // Should not contain HTML tags
+
     assert!(!chapter1.content.contains("<h1>"));
     assert!(!chapter1.content.contains("<p>"));
 }
@@ -105,8 +105,7 @@ fn test_chapter_content_extraction() {
 fn test_search_content() {
     let (_temp_dir, epub_path) = create_test_epub();
     let epub = EpubReader::new(&epub_path).expect("Failed to parse test EPUB");
-    
-    // Test search functionality
+
     let search_results = epub.search("Lorem ipsum");
     assert!(!search_results.is_empty());
     assert_eq!(search_results[0].chapter_index, 0);
@@ -154,7 +153,7 @@ fn test_missing_container_xml() {
     let result = EpubReader::new(&epub_path);
     assert!(result.is_err());
     match result.unwrap_err() {
-        EpubError::ContainerNotFound => {}, // This is what we expect
+        EpubError::ContainerNotFound => {}
         other => panic!("Expected ContainerNotFound, got: {:?}", other),
     }
 }
@@ -184,7 +183,7 @@ fn test_missing_opf_file() {
     let result = EpubReader::new(&epub_path);
     assert!(result.is_err());
     match result.unwrap_err() {
-        EpubError::OpfNotFound => {}, // This is what we expect
+        EpubError::OpfNotFound => {}
         other => panic!("Expected OpfNotFound, got: {:?}", other),
     }
 }
@@ -220,7 +219,6 @@ fn test_invalid_opf_structure() {
   <manifest>
     <item id="chapter1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>
   </manifest>
-  <!-- Missing spine section makes this invalid -->
 </package>"#).unwrap();
     
     zip.finish().unwrap();
@@ -228,7 +226,7 @@ fn test_invalid_opf_structure() {
     let result = EpubReader::new(&epub_path);
     assert!(result.is_err());
     match result.unwrap_err() {
-        EpubError::InvalidOpfStructure => {}, // This is what we expect
+        EpubError::InvalidOpfStructure => {}
         other => panic!("Expected InvalidOpfStructure, got: {:?}", other),
     }
 }
@@ -270,11 +268,53 @@ fn test_chapter_not_found() {
 </package>"#).unwrap();
     
     zip.finish().unwrap();
-    
+
     let result = EpubReader::new(&epub_path);
-    // This should succeed in parsing but result in empty chapters
-    // since we skip missing files with a warning
     assert!(result.is_ok());
     let epub = result.unwrap();
-    assert_eq!(epub.chapters.len(), 0); // No chapters because the file is missing
+    assert_eq!(epub.chapter_count(), 0);
+}
+
+#[test]
+fn test_lazy_loading() {
+    let (_temp_dir, epub_path) = create_test_epub();
+    let epub = EpubReader::new(&epub_path).expect("Failed to parse test EPUB");
+
+    assert_eq!(epub.chapter_count(), 2);
+
+    let chapter0 = epub.get_chapter(0).expect("Failed to load chapter 0");
+    assert_eq!(chapter0.title, "Chapter 1");
+
+    let chapter0_again = epub.get_chapter(0).expect("Failed to load chapter 0 from cache");
+    assert_eq!(chapter0_again.title, "Chapter 1");
+    assert_eq!(chapter0.content, chapter0_again.content);
+}
+
+#[test]
+fn test_invalid_chapter_index() {
+    let (_temp_dir, epub_path) = create_test_epub();
+    let epub = EpubReader::new(&epub_path).expect("Failed to parse test EPUB");
+
+    let result = epub.get_chapter(999);
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        catatau::EpubError::InvalidChapterIndex(idx) => assert_eq!(idx, 999),
+        other => panic!("Expected InvalidChapterIndex, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_chapter_caching() {
+    let (_temp_dir, epub_path) = create_test_epub();
+    let epub = EpubReader::new(&epub_path).expect("Failed to parse test EPUB");
+
+    for _ in 0..3 {
+        let chapter = epub.get_chapter(0).expect("Failed to load chapter");
+        assert!(chapter.content.contains("Chapter One"));
+    }
+
+    for _ in 0..3 {
+        let chapter = epub.get_chapter(1).expect("Failed to load chapter");
+        assert!(chapter.content.contains("Chapter Two"));
+    }
 }

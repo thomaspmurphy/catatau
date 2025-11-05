@@ -1,11 +1,21 @@
 use crate::{
     constants::{
-        HTML_TEXT_WIDTH, MIN_CONTENT_LENGTH, SEARCH_CONTEXT_AFTER_LINES, SEARCH_CONTEXT_LINES,
+        CHAPTER_CACHE_SIZE, HTML_TEXT_WIDTH, MAX_CHAPTER_SIZE, MAX_DECOMPRESSED_RATIO,
+        MAX_EPUB_SIZE, MIN_CONTENT_LENGTH, SEARCH_CONTEXT_AFTER_LINES, SEARCH_CONTEXT_LINES,
     },
     error::EpubError,
 };
+use lru::LruCache;
 use quick_xml::{Reader, events::Event};
-use std::{collections::HashMap, fs::File, io::Read, path::Path};
+use std::{
+    collections::HashMap,
+    fs::File,
+    io::Read,
+    num::NonZeroUsize,
+    path::Path,
+    sync::{Arc, Mutex},
+};
+use tracing::{debug, info, warn};
 use zip::ZipArchive;
 
 #[derive(Debug, Clone)]
@@ -39,29 +49,126 @@ struct OpfData {
     opf_path: String,
 }
 
+#[derive(Debug, Clone)]
+struct ChapterInfo {
+    href: String,
+    title: String,
+}
+
 #[derive(Debug)]
 pub struct EpubReader {
-    pub chapters: Vec<Chapter>,
+    archive: Arc<Mutex<ZipArchive<File>>>,
+    chapter_cache: Arc<Mutex<LruCache<usize, Chapter>>>,
+    chapter_info: Vec<ChapterInfo>,
+    opf_path: String,
     pub title: String,
     pub author: String,
 }
 
 impl EpubReader {
+    pub fn chapter_count(&self) -> usize {
+        self.chapter_info.len()
+    }
+
+    pub fn get_chapter(&self, index: usize) -> Result<Chapter, EpubError> {
+        if index >= self.chapter_info.len() {
+            return Err(EpubError::InvalidChapterIndex(index));
+        }
+
+        {
+            let mut cache = self
+                .chapter_cache
+                .lock()
+                .map_err(|_| EpubError::CacheLockError)?;
+
+            if let Some(chapter) = cache.get(&index) {
+                debug!("Chapter {} loaded from cache", index);
+                return Ok(chapter.clone());
+            }
+        }
+
+        debug!("Loading chapter {} from archive", index);
+        let chapter = self.load_chapter(index)?;
+
+        {
+            let mut cache = self
+                .chapter_cache
+                .lock()
+                .map_err(|_| EpubError::CacheLockError)?;
+            cache.put(index, chapter.clone());
+        }
+
+        Ok(chapter)
+    }
+
+    fn load_chapter(&self, index: usize) -> Result<Chapter, EpubError> {
+        let info = &self.chapter_info[index];
+        let mut archive = self
+            .archive
+            .lock()
+            .map_err(|_| EpubError::CacheLockError)?;
+
+        let content =
+            Self::resolve_and_read_file_from_archive(&mut archive, &info.href, &self.opf_path)?;
+
+        let text_content = html2text::from_read(content.as_bytes(), HTML_TEXT_WIDTH);
+
+        if text_content.len() > MAX_CHAPTER_SIZE {
+            warn!(
+                "Chapter {} exceeds size limit: {} bytes",
+                index,
+                text_content.len()
+            );
+            return Err(EpubError::ChapterTooLarge {
+                size: text_content.len(),
+                max: MAX_CHAPTER_SIZE,
+            });
+        }
+
+        Ok(Chapter {
+            title: info.title.clone(),
+            content: text_content,
+            id: info.href.clone(),
+        })
+    }
+
+}
+
+impl EpubReader {
     pub fn new(path: &Path) -> Result<Self, EpubError> {
+        info!("Opening EPUB file: {:?}", path);
+
+        let metadata = std::fs::metadata(path)?;
+        let file_size = metadata.len();
+
+        if file_size > MAX_EPUB_SIZE {
+            return Err(EpubError::FileTooLarge {
+                size: file_size,
+                max: MAX_EPUB_SIZE,
+            });
+        }
+
+        debug!("EPUB file size: {} bytes", file_size);
+
         let file = File::open(path)?;
         let mut archive = ZipArchive::new(file)?;
 
-        // Find and parse container.xml to get the OPF file path
         let opf_path = Self::find_opf_path(&mut archive)?;
-
-        // Parse the OPF file to get metadata, spine, and opf path
         let opf_data = Self::parse_opf(&mut archive, &opf_path)?;
+        let chapter_info = Self::extract_chapter_info(&mut archive, opf_data.spine, &opf_data.opf_path)?;
 
-        // Extract chapter content
-        let chapters = Self::extract_chapters(&mut archive, opf_data.spine, &opf_data.opf_path)?;
+        info!("Loaded EPUB with {} chapters", chapter_info.len());
+
+        let file = File::open(path)?;
+        let archive = Arc::new(Mutex::new(ZipArchive::new(file)?));
+        let cache_size = NonZeroUsize::new(CHAPTER_CACHE_SIZE).unwrap();
+        let chapter_cache = Arc::new(Mutex::new(LruCache::new(cache_size)));
 
         Ok(EpubReader {
-            chapters,
+            archive,
+            chapter_cache,
+            chapter_info,
+            opf_path: opf_data.opf_path,
             title: opf_data
                 .metadata
                 .get("title")
@@ -188,7 +295,6 @@ impl EpubReader {
             buf.clear();
         }
 
-        // Validate that we have the bare essentials of a valid EPUB
         if spine.is_empty() {
             return Err(EpubError::InvalidOpfStructure);
         }
@@ -200,57 +306,74 @@ impl EpubReader {
         })
     }
 
-    fn extract_chapters(
+    fn extract_chapter_info(
         archive: &mut ZipArchive<File>,
         spine: Vec<String>,
         opf_path: &str,
-    ) -> Result<Vec<Chapter>, EpubError> {
-        let mut chapters = Vec::new();
+    ) -> Result<Vec<ChapterInfo>, EpubError> {
+        let mut chapter_info = Vec::new();
 
-        for href in spine.iter() {
-            let content = match Self::resolve_and_read_file(archive, href, opf_path) {
-                Ok(content) => content,
-                Err(_) => {
-                    eprintln!("Warning: Could not find file: {}", href);
+        for (index, href) in spine.iter().enumerate() {
+            match Self::resolve_and_read_file_from_archive(archive, href, opf_path) {
+                Ok(content) => {
+                    Self::validate_decompression_ratio(archive, href)?;
+
+                    let text_content = html2text::from_read(content.as_bytes(), HTML_TEXT_WIDTH);
+
+                    if text_content.trim().len() < MIN_CONTENT_LENGTH {
+                        debug!("Skipping chapter {} (too short): {}", index, href);
+                        continue;
+                    }
+
+                    let chapter_title =
+                        Self::extract_chapter_title(&content, &text_content, chapter_info.len() + 1);
+
+                    chapter_info.push(ChapterInfo {
+                        href: href.clone(),
+                        title: chapter_title,
+                    });
+                }
+                Err(e) => {
+                    warn!("Could not load chapter {}: {}", href, e);
                     continue;
                 }
-            };
-
-            // Convert HTML to plain text
-            let text_content = html2text::from_read(content.as_bytes(), HTML_TEXT_WIDTH);
-
-            // Skip if content is too short (likely not actual content)
-            if text_content.trim().len() < MIN_CONTENT_LENGTH {
-                continue;
             }
-
-            // Extract chapter title from content or HTML
-            let chapter_title =
-                Self::extract_chapter_title(&content, &text_content, chapters.len() + 1);
-
-            chapters.push(Chapter {
-                title: chapter_title,
-                content: text_content,
-                id: href.clone(),
-            });
         }
 
-        Ok(chapters)
+        Ok(chapter_info)
     }
 
-    fn resolve_and_read_file(
+    fn validate_decompression_ratio(
+        archive: &mut ZipArchive<File>,
+        filename: &str,
+    ) -> Result<(), EpubError> {
+        if let Ok(file) = archive.by_name(filename) {
+            let compressed = file.compressed_size();
+            let decompressed = file.size();
+
+            if compressed > 0 {
+                let ratio = (decompressed / compressed) as usize;
+                if ratio > MAX_DECOMPRESSED_RATIO {
+                    return Err(EpubError::DecompressionBomb {
+                        compressed,
+                        decompressed,
+                        ratio,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve_and_read_file_from_archive(
         archive: &mut ZipArchive<File>,
         href: &str,
         opf_path: &str,
     ) -> Result<String, EpubError> {
-        // Get the OPF directory as the base path
         let opf_dir = Path::new(opf_path).parent().unwrap_or(Path::new(""));
-
-        // Resolve href relative to OPF directory
         let resolved_path = opf_dir.join(href);
         let resolved_path_str = resolved_path.to_string_lossy();
 
-        // Try the properly resolved path first
         if let Ok(mut file) = archive.by_name(&resolved_path_str) {
             let mut content = String::new();
             file.read_to_string(&mut content)?;
@@ -264,7 +387,6 @@ impl EpubReader {
             return Ok(content);
         }
 
-        // Final fallback: try possible EPUB directory structures
         let fallback_paths = Self::generate_fallback_paths(href);
         for path in fallback_paths {
             if let Ok(mut file) = archive.by_name(&path) {
@@ -293,22 +415,18 @@ impl EpubReader {
         text_content: &str,
         fallback_number: usize,
     ) -> String {
-        // Try to extract title from HTML tags first
         if let Some(title) = Self::extract_title_from_html(html_content) {
             return title;
         }
 
-        // Try to extract title from the first line of text content
         if let Some(title) = Self::extract_title_from_text(text_content) {
             return title;
         }
 
-        // Fallback to generic chapter numbering
         format!("Chapter {}", fallback_number)
     }
 
     fn extract_title_from_html(html_content: &str) -> Option<String> {
-        // Look for title in common HTML tags
         // TODO: Seems like this could be improved with a more robust HTML parser.
         let title_patterns = [
             r"<title[^>]*>([^<]+)</title>",
@@ -336,10 +454,8 @@ impl EpubReader {
     }
 
     fn extract_title_from_text(text_content: &str) -> Option<String> {
-        // Try to find a title-like first line
         let first_line = text_content.lines().next()?.trim();
 
-        // Check if the first line looks like a title
         if !first_line.is_empty()
             && first_line.len() < 100
             && first_line.len() > 3
@@ -357,19 +473,25 @@ impl EpubReader {
         let mut results = Vec::new();
         let query_lower = query.to_lowercase();
 
-        for (chapter_index, chapter) in self.chapters.iter().enumerate() {
+        for chapter_index in 0..self.chapter_count() {
+            let chapter = match self.get_chapter(chapter_index) {
+                Ok(ch) => ch,
+                Err(e) => {
+                    warn!("Failed to load chapter {} for search: {}", chapter_index, e);
+                    continue;
+                }
+            };
+
             let lines: Vec<&str> = chapter.content.lines().collect();
 
             for (line_index, line) in lines.iter().enumerate() {
                 let line_lower = line.to_lowercase();
                 if line_lower.contains(&query_lower) {
-                    // Calculate the position within the chapter
                     let position: usize = lines[..line_index]
                         .iter()
-                        .map(|l| l.len() + 1) // +1 for newline
+                        .map(|l| l.len() + 1)
                         .sum();
 
-                    // Create context around the match
                     let start = line_index.saturating_sub(SEARCH_CONTEXT_LINES);
                     let end = std::cmp::min(line_index + SEARCH_CONTEXT_AFTER_LINES, lines.len());
                     let context_lines = &lines[start..end];
@@ -390,10 +512,9 @@ impl EpubReader {
 
     #[allow(dead_code)]
     pub fn get_chapter_line_count(&self, chapter_index: usize) -> usize {
-        if let Some(chapter) = self.chapters.get(chapter_index) {
-            chapter.content.lines().count()
-        } else {
-            0
+        match self.get_chapter(chapter_index) {
+            Ok(chapter) => chapter.content.lines().count(),
+            Err(_) => 0,
         }
     }
 }

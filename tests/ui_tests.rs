@@ -79,28 +79,24 @@ fn test_app_initialization() {
     let (_temp_dir, epub_path) = create_test_epub_with_content();
     let epub = EpubReader::new(&epub_path).expect("Failed to parse test EPUB");
     let app = App::new(epub);
-    
-    // Test that app initializes correctly
+
     assert_eq!(app.current_chapter(), 0);
     assert_eq!(app.scroll_offset(), 0);
-    assert_eq!(app.epub().chapters.len(), 2);
+    assert_eq!(app.epub().chapter_count(), 2);
 }
 
 #[test]
 fn test_search_functionality() {
     let (_temp_dir, epub_path) = create_test_epub_with_content();
     let epub = EpubReader::new(&epub_path).expect("Failed to parse test EPUB");
-    
-    // Test search across chapters
+
     let results = epub.search("magic crystal");
     assert!(!results.is_empty());
-    assert_eq!(results.len(), 2); // Should appear in both chapters
-    
-    // Verify the first result is in chapter 1
+    assert_eq!(results.len(), 2);
+
     assert_eq!(results[0].chapter_index, 0);
     assert!(results[0].context.contains("magic crystal"));
-    
-    // Verify the second result is in chapter 2
+
     assert_eq!(results[1].chapter_index, 1);
     assert!(results[1].context.contains("magic crystal"));
 }
@@ -123,13 +119,11 @@ fn test_search_case_insensitive() {
 fn test_search_unique_content() {
     let (_temp_dir, epub_path) = create_test_epub_with_content();
     let epub = EpubReader::new(&epub_path).expect("Failed to parse test EPUB");
-    
-    // Search for content that only appears in chapter 1
+
     let results = epub.search("extraordinary in the forest");
     assert!(!results.is_empty());
     assert_eq!(results[0].chapter_index, 0);
-    
-    // Search for content that only appears in chapter 2
+
     let results = epub.search("ancient guardian");
     assert!(!results.is_empty());
     assert_eq!(results[0].chapter_index, 1);
@@ -160,5 +154,6 @@ fn test_search_with_line_numbers() {
     let first_result = &results[0];
     assert_eq!(first_result.chapter_index, 0);
     assert!(first_result.line_number < epub.get_chapter_line_count(0));
-    assert!(first_result.position < epub.chapters[0].content.len());
+    let chapter0 = epub.get_chapter(0).expect("Failed to get chapter 0");
+    assert!(first_result.position < chapter0.content.len());
 }

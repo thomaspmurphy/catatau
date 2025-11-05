@@ -10,6 +10,11 @@ pub enum EpubError {
     OpfNotFound,
     InvalidOpfStructure,
     ChapterNotFound(String),
+    FileTooLarge { size: u64, max: u64 },
+    ChapterTooLarge { size: usize, max: usize },
+    DecompressionBomb { compressed: u64, decompressed: u64, ratio: usize },
+    InvalidChapterIndex(usize),
+    CacheLockError,
 }
 
 impl fmt::Display for EpubError {
@@ -23,6 +28,25 @@ impl fmt::Display for EpubError {
             EpubError::OpfNotFound => write!(f, "OPF file not found"),
             EpubError::InvalidOpfStructure => write!(f, "Invalid OPF file structure"),
             EpubError::ChapterNotFound(path) => write!(f, "Chapter file not found: {}", path),
+            EpubError::FileTooLarge { size, max } => {
+                write!(f, "EPUB file too large: {} bytes (max: {} bytes)", size, max)
+            }
+            EpubError::ChapterTooLarge { size, max } => {
+                write!(f, "Chapter too large: {} bytes (max: {} bytes)", size, max)
+            }
+            EpubError::DecompressionBomb { compressed, decompressed, ratio } => {
+                write!(
+                    f,
+                    "Potential decompression bomb detected: {}x ratio (compressed: {}, decompressed: {})",
+                    ratio, compressed, decompressed
+                )
+            }
+            EpubError::InvalidChapterIndex(idx) => {
+                write!(f, "Invalid chapter index: {}", idx)
+            }
+            EpubError::CacheLockError => {
+                write!(f, "Failed to acquire cache lock")
+            }
         }
     }
 }
