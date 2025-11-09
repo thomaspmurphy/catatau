@@ -214,11 +214,13 @@ dependencies = [
  "lru",
  "quick-xml",
  "ratatui",
+ "rayon",
  "regex",
  "skim",
  "tempfile",
  "tracing",
  "tracing-subscriber",
+ "unicode-segmentation",
  "zip",
 ]
 

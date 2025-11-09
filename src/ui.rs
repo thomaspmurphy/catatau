@@ -12,10 +12,13 @@ use crossterm::{
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{
+        Block, BorderType, Borders, Clear, Gauge, List, ListItem, ListState, Padding, Paragraph,
+        Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+    },
 };
 use std::io;
 
@@ -215,41 +218,57 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3), // Header
+                Constraint::Length(4), // Header
                 Constraint::Min(0),    // Content
-                Constraint::Length(1), // Footer
+                Constraint::Length(3), // Footer with progress
             ])
             .split(f.area());
 
-        let header = Paragraph::new(vec![Line::from(vec![
+        // Modern header with rounded borders and better styling
+        let title_line = Line::from(vec![
+            Span::styled(
+                "📖 ",
+                Style::default().fg(Color::Cyan),
+            ),
             Span::styled(
                 &epub.title,
                 Style::default()
-                    .fg(Color::White)
+                    .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" by ", Style::default().fg(Color::White)),
+        ]);
+
+        let author_line = Line::from(vec![
+            Span::styled("   by ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 &epub.author,
                 Style::default()
-                    .fg(Color::White)
+                    .fg(Color::LightBlue)
                     .add_modifier(Modifier::ITALIC),
             ),
-        ])])
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Catatau - EPUB Reader"),
-        );
+        ]);
+
+        let header = Paragraph::new(vec![title_line, author_line])
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(Color::Cyan))
+                    .padding(Padding::horizontal(1)),
+            )
+            .alignment(Alignment::Left);
         f.render_widget(header, chunks[0]);
 
         if let Ok(chapter) = epub.get_chapter(current_chapter) {
+            let total_lines = chapter.content.lines().count();
+            let visible_lines = terminal_height.saturating_sub(UI_RESERVED_HEIGHT);
+
             let lines: Vec<Line> = if let Some(search_term) = highlighted_search_term {
                 chapter
                     .content
                     .lines()
                     .skip(scroll_offset)
-                    .take(terminal_height.saturating_sub(UI_RESERVED_HEIGHT))
+                    .take(visible_lines)
                     .map(|line| Self::highlight_line(line, search_term))
                     .collect()
             } else {
@@ -257,71 +276,285 @@ impl App {
                     .content
                     .lines()
                     .skip(scroll_offset)
-                    .take(terminal_height.saturating_sub(UI_RESERVED_HEIGHT))
-                    .map(|line| {
-                        Line::from(vec![Span::styled(
-                            line.to_string(),
-                            Style::default().fg(Color::White),
-                        )])
-                    })
+                    .take(visible_lines)
+                    .map(|line| Self::style_line(line))
                     .collect()
             };
 
+            let chapter_title = format!("│ {} ", chapter.title);
             let content = Paragraph::new(lines)
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(chapter.title.as_str()),
+                        .border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(Color::Blue))
+                        .title(chapter_title)
+                        .title_style(Style::default().fg(Color::LightBlue).add_modifier(Modifier::BOLD))
+                        .padding(Padding::new(2, 1, 0, 0)),
                 )
                 .style(Style::default().fg(Color::White))
                 .wrap(Wrap { trim: false });
             f.render_widget(content, chunks[1]);
+
+            // Render scrollbar indicator
+            if total_lines > visible_lines {
+                let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                    .begin_symbol(Some("↑"))
+                    .end_symbol(Some("↓"))
+                    .track_symbol(Some("│"))
+                    .thumb_symbol("█")
+                    .style(Style::default().fg(Color::Cyan));
+
+                let mut scrollbar_state = ScrollbarState::new(total_lines.saturating_sub(visible_lines))
+                    .position(scroll_offset);
+
+                let scrollbar_area = Rect {
+                    x: chunks[1].x + chunks[1].width.saturating_sub(1),
+                    y: chunks[1].y + 1,
+                    width: 1,
+                    height: chunks[1].height.saturating_sub(2),
+                };
+
+                f.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+            }
         }
 
-        let footer_text = format!(
-            "{}/{} | q:quit, ↑↓/jk:scroll, ←→/hl:chapters, space/b:page, g/G:start/end, /:search, -:contents",
-            current_chapter + 1,
-            epub.chapter_count()
-        );
-        let footer = Paragraph::new(footer_text).style(Style::default().fg(Color::Gray));
-        f.render_widget(footer, chunks[2]);
+        // Modern footer with progress bar and icons
+        let chapter_progress = if epub.chapter_count() > 0 {
+            ((current_chapter + 1) as f64 / epub.chapter_count() as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let footer_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // Progress bar
+                Constraint::Length(2), // Help text
+            ])
+            .split(chunks[2]);
+
+        // Progress bar
+        let progress_label = format!("Chapter {}/{}", current_chapter + 1, epub.chapter_count());
+        let progress = Gauge::default()
+            .block(Block::default())
+            .gauge_style(Style::default().fg(Color::Cyan).bg(Color::DarkGray))
+            .percent(chapter_progress as u16)
+            .label(progress_label);
+        f.render_widget(progress, footer_chunks[0]);
+
+        // Help text with icons
+        let help_text = vec![
+            Line::from(vec![
+                Span::styled(" q", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                Span::styled(":quit ", Style::default().fg(Color::DarkGray)),
+                Span::styled("↑↓", Style::default().fg(Color::Cyan)),
+                Span::styled(":scroll ", Style::default().fg(Color::DarkGray)),
+                Span::styled("←→", Style::default().fg(Color::Green)),
+                Span::styled(":chapter ", Style::default().fg(Color::DarkGray)),
+                Span::styled("⎵", Style::default().fg(Color::Yellow)),
+                Span::styled(":page ", Style::default().fg(Color::DarkGray)),
+                Span::styled("/", Style::default().fg(Color::Magenta)),
+                Span::styled(":search ", Style::default().fg(Color::DarkGray)),
+                Span::styled("-", Style::default().fg(Color::Blue)),
+                Span::styled(":contents", Style::default().fg(Color::DarkGray)),
+            ]),
+        ];
+        let footer = Paragraph::new(help_text)
+            .block(
+                Block::default()
+                    .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(Color::DarkGray))
+            )
+            .alignment(Alignment::Center);
+        f.render_widget(footer, footer_chunks[1]);
 
         Self::render_floating_pane(f, floating_pane, epub);
     }
 
+    fn style_line(line: &str) -> Line<'static> {
+        let trimmed = line.trim_start();
+
+        // Detect markdown-style headers
+        if trimmed.starts_with("# ") {
+            let text = trimmed[2..].to_string();
+            return Line::from(vec![Span::styled(
+                text,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )]);
+        } else if trimmed.starts_with("## ") {
+            let text = trimmed[3..].to_string();
+            return Line::from(vec![Span::styled(
+                text,
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::BOLD),
+            )]);
+        } else if trimmed.starts_with("### ") {
+            let text = trimmed[4..].to_string();
+            return Line::from(vec![Span::styled(
+                text,
+                Style::default()
+                    .fg(Color::LightBlue)
+                    .add_modifier(Modifier::BOLD),
+            )]);
+        } else if trimmed.starts_with("#### ") || trimmed.starts_with("##### ") || trimmed.starts_with("###### ") {
+            let hash_count = trimmed.chars().take_while(|&c| c == '#').count();
+            let text = trimmed[hash_count + 1..].to_string();
+            return Line::from(vec![Span::styled(
+                text,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )]);
+        }
+
+        // Parse inline formatting (**bold**, *italic*)
+        Self::parse_inline_formatting(line)
+    }
+
+    fn parse_inline_formatting(text: &str) -> Line<'static> {
+        let mut spans = Vec::new();
+        let mut current_text = String::new();
+        let mut chars = text.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if ch == '*' {
+                if chars.peek() == Some(&'*') {
+                    // Handle **bold**
+                    chars.next();
+                    if !current_text.is_empty() {
+                        spans.push(Span::styled(
+                            current_text.clone(),
+                            Style::default().fg(Color::White),
+                        ));
+                        current_text.clear();
+                    }
+                    let mut bold_text = String::new();
+                    let mut found_close = false;
+                    while let Some(ch2) = chars.next() {
+                        if ch2 == '*' && chars.peek() == Some(&'*') {
+                            chars.next();
+                            found_close = true;
+                            break;
+                        }
+                        bold_text.push(ch2);
+                    }
+                    if found_close && !bold_text.is_empty() {
+                        spans.push(Span::styled(
+                            bold_text,
+                            Style::default()
+                                .fg(Color::White)
+                                .add_modifier(Modifier::BOLD),
+                        ));
+                    }
+                } else {
+                    // Handle *italic*
+                    if !current_text.is_empty() {
+                        spans.push(Span::styled(
+                            current_text.clone(),
+                            Style::default().fg(Color::White),
+                        ));
+                        current_text.clear();
+                    }
+                    let mut italic_text = String::new();
+                    let mut found_close = false;
+                    while let Some(ch2) = chars.next() {
+                        if ch2 == '*' {
+                            found_close = true;
+                            break;
+                        }
+                        italic_text.push(ch2);
+                    }
+                    if found_close && !italic_text.is_empty() {
+                        spans.push(Span::styled(
+                            italic_text,
+                            Style::default()
+                                .fg(Color::White)
+                                .add_modifier(Modifier::ITALIC),
+                        ));
+                    }
+                }
+            } else {
+                current_text.push(ch);
+            }
+        }
+
+        if !current_text.is_empty() {
+            spans.push(Span::styled(
+                current_text,
+                Style::default().fg(Color::White),
+            ));
+        }
+
+        if spans.is_empty() {
+            Line::from(vec![Span::styled(
+                text.to_string(),
+                Style::default().fg(Color::White),
+            )])
+        } else {
+            Line::from(spans)
+        }
+    }
+
     fn highlight_line(line: &str, search_term: &str) -> Line<'static> {
         let search_lower = search_term.to_lowercase();
-        let line_lower = line.to_lowercase();
 
-        if let Some(pos) = line_lower.find(&search_lower) {
+        // First check if this is a header
+        let trimmed = line.trim_start();
+        let (is_header, header_level, text_after_hash) = if trimmed.starts_with("# ") {
+            (true, 1, trimmed[2..].to_string())
+        } else if trimmed.starts_with("## ") {
+            (true, 2, trimmed[3..].to_string())
+        } else if trimmed.starts_with("### ") {
+            (true, 3, trimmed[4..].to_string())
+        } else {
+            (false, 0, line.to_string())
+        };
+
+        let text_to_search = if is_header { &text_after_hash } else { line };
+        let text_lower = text_to_search.to_lowercase();
+
+        if let Some(pos) = text_lower.find(&search_lower) {
             let mut spans = Vec::new();
+
+            let base_style = if is_header {
+                match header_level {
+                    1 => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    2 => Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+                    3 => Style::default().fg(Color::LightBlue).add_modifier(Modifier::BOLD),
+                    _ => Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                }
+            } else {
+                Style::default().fg(Color::White)
+            };
 
             if pos > 0 {
                 spans.push(Span::styled(
-                    line[..pos].to_string(),
-                    Style::default().fg(Color::White),
+                    text_to_search[..pos].to_string(),
+                    base_style,
                 ));
             }
 
             let end_pos = pos + search_term.len();
             spans.push(Span::styled(
-                line[pos..end_pos.min(line.len())].to_string(),
+                text_to_search[pos..end_pos.min(text_to_search.len())].to_string(),
                 Style::default().bg(Color::Yellow).fg(Color::Black),
             ));
 
-            if end_pos < line.len() {
+            if end_pos < text_to_search.len() {
                 spans.push(Span::styled(
-                    line[end_pos..].to_string(),
-                    Style::default().fg(Color::White),
+                    text_to_search[end_pos..].to_string(),
+                    base_style,
                 ));
             }
 
             Line::from(spans)
         } else {
-            Line::from(vec![Span::styled(
-                line.to_string(),
-                Style::default().fg(Color::White),
-            )])
+            Self::style_line(line)
         }
     }
 
@@ -659,6 +892,18 @@ impl App {
             height: popup_height,
         };
 
+        // Render shadow effect
+        let shadow_area = Rect {
+            x: x + 1,
+            y: y + 1,
+            width: popup_width,
+            height: popup_height,
+        };
+        f.render_widget(
+            Block::default().style(Style::default().bg(Color::Black)),
+            shadow_area,
+        );
+
         f.render_widget(Clear, popup_area);
 
         let chunks = Layout::default()
@@ -666,13 +911,29 @@ impl App {
             .constraints([
                 Constraint::Length(3), // Search input
                 Constraint::Min(0),    // Results
+                Constraint::Length(1), // Help text
             ])
             .split(popup_area);
 
-        let input = Paragraph::new(format!("Search: {}", query))
+        // Search input with blinking cursor effect
+        let cursor = if std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            % 1000
+            < 500
+        {
+            "█"
+        } else {
+            " "
+        };
+
+        let input = Paragraph::new(format!("🔍 Search: {}{}", query, cursor))
             .block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(Color::Yellow))
                     .title("Search Content")
                     .style(Style::default().fg(Color::Yellow)),
             )
@@ -685,19 +946,42 @@ impl App {
             .collect();
 
         let results_list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(format!(
-                "Results ({}/{})",
-                if results.is_empty() { 0 } else { selected_index + 1 },
-                results.len()
-            )))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(Color::Cyan))
+                    .title(format!(
+                        "Results ({}/{})",
+                        if results.is_empty() { 0 } else { selected_index + 1 },
+                        results.len()
+                    )),
+            )
             .style(Style::default().fg(Color::White))
-            .highlight_style(Style::default().bg(Color::Yellow).fg(Color::Black))
+            .highlight_style(
+                Style::default()
+                    .bg(Color::Yellow)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            )
             .highlight_symbol("▶ ");
 
         let mut list_state = ListState::default();
         list_state.select(if results.is_empty() { None } else { Some(selected_index) });
 
         f.render_stateful_widget(results_list, chunks[1], &mut list_state);
+
+        // Help text
+        let help = Paragraph::new(Line::from(vec![
+            Span::styled("↑↓", Style::default().fg(Color::Yellow)),
+            Span::raw(" navigate  "),
+            Span::styled("Enter", Style::default().fg(Color::Yellow)),
+            Span::raw(" select  "),
+            Span::styled("Esc", Style::default().fg(Color::Yellow)),
+            Span::raw(" close"),
+        ]))
+        .alignment(Alignment::Center);
+        f.render_widget(help, chunks[2]);
     }
 
     fn render_contents_pane(f: &mut Frame, epub: &EpubReader, selected_index: usize) {
@@ -715,18 +999,30 @@ impl App {
             height: popup_height,
         };
 
+        // Render shadow effect
+        let shadow_area = Rect {
+            x: x + 1,
+            y: y + 1,
+            width: popup_width,
+            height: popup_height,
+        };
+        f.render_widget(
+            Block::default().style(Style::default().bg(Color::Black)),
+            shadow_area,
+        );
+
         f.render_widget(Clear, popup_area);
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .split(popup_area);
 
         let items: Vec<ListItem> = (0..epub.chapter_count())
             .filter_map(|i| {
-                epub.get_chapter(i).ok().map(|chapter| {
-                    let style = if i == selected_index {
-                        Style::default().bg(Color::Yellow).fg(Color::Black)
-                    } else {
-                        Style::default()
-                    };
-                    ListItem::new(format!("{}: {}", i + 1, chapter.title)).style(style)
-                })
+                epub.get_chapter(i)
+                    .ok()
+                    .map(|chapter| ListItem::new(format!("{}: {}", i + 1, chapter.title)))
             })
             .collect();
 
@@ -734,11 +1030,35 @@ impl App {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("Table of Contents")
-                    .style(Style::default().fg(Color::White)),
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(Color::Blue))
+                    .title(format!("📑 Table of Contents ({} chapters)", epub.chapter_count()))
+                    .style(Style::default().fg(Color::Blue)),
             )
-            .style(Style::default().fg(Color::White));
+            .style(Style::default().fg(Color::White))
+            .highlight_style(
+                Style::default()
+                    .bg(Color::Blue)
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("▶ ");
 
-        f.render_widget(contents_list, popup_area);
+        let mut list_state = ListState::default();
+        list_state.select(Some(selected_index));
+
+        f.render_stateful_widget(contents_list, chunks[0], &mut list_state);
+
+        // Help text
+        let help = Paragraph::new(Line::from(vec![
+            Span::styled("↑↓", Style::default().fg(Color::Blue)),
+            Span::raw(" navigate  "),
+            Span::styled("Enter", Style::default().fg(Color::Blue)),
+            Span::raw(" select  "),
+            Span::styled("Esc", Style::default().fg(Color::Blue)),
+            Span::raw(" close"),
+        ]))
+        .alignment(Alignment::Center);
+        f.render_widget(help, chunks[1]);
     }
 }
